@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"strconv"
+	"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +30,13 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // main/mrworker.go calls this function.
@@ -33,9 +46,98 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	args := Args{}
+	reply := Reply{}
 
+	for ok := call("Coordinator.DistributeTask", &args, &reply); ok; ok = call("Coordinator.DistributeTask", &args, &reply) {
+		switch reply.TaskType {
+		case MAP:
+			{
+				content, _ := os.ReadFile(reply.FileName)
+				kva := mapf(reply.FileName, string(content))
+
+				var intermediateFiles []*os.File
+
+				for i := 0; i < reply.NReduce; i += 1 {
+					intermediateFileName := "mr-" + strconv.Itoa(reply.MapIndex) + "-" + strconv.Itoa(i)
+					intermediateFile, _ := os.OpenFile(intermediateFileName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0660)
+					intermediateFiles = append(intermediateFiles, intermediateFile)
+				}
+
+				for _, kv := range kva {
+					intermediateFile := intermediateFiles[ihash(kv.Key)%reply.NReduce]
+					encoder := json.NewEncoder(intermediateFile)
+					encoder.Encode(&kv)
+
+				}
+
+				for i := 0; i < reply.NReduce; i += 1 {
+					defer intermediateFiles[i].Close()
+				}
+
+				args.MapIndex = reply.MapIndex
+				args.TaskType = MAP
+				call("Coordinator.CompleteTask", &args, &reply)
+
+			}
+		case REDUCE:
+			{
+				var kva []KeyValue
+				for i := 0; i < reply.NMap; i += 1 {
+					intermediateFileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.ReduceIndex)
+					intermediateFile, _ := os.Open(intermediateFileName)
+
+					decoder := json.NewDecoder(intermediateFile)
+					for {
+						var kv KeyValue
+						if err := decoder.Decode(&kv); err != nil {
+							break
+						}
+						kva = append(kva, kv)
+					}
+
+					intermediateFile.Close()
+					// os.Remove(intermediateFileName)
+				}
+
+				outputFileName := "mr-out-" + strconv.Itoa(reply.ReduceIndex)
+				outputFile, _ := os.Create(outputFileName)
+
+				sort.Sort(ByKey(kva))
+
+				i := 0
+				for i < len(kva) {
+					j := i + 1
+					for j < len(kva) && kva[j].Key == kva[i].Key {
+						j++
+					}
+
+					key := kva[i].Key
+					values := []string{}
+					for k := i; k < j; k++ {
+						values = append(values, kva[k].Value)
+					}
+
+					value := reducef(key, values)
+
+					fmt.Fprintf(outputFile, "%v %v\n", key, value)
+
+					i = j
+				}
+
+				outputFile.Close()
+
+				args.ReduceIndex = reply.ReduceIndex
+				args.TaskType = REDUCE
+				call("Coordinator.CompleteTask", &args, &reply)
+			}
+		case WAIT:
+			time.Sleep(time.Second)
+		default:
+			return
+		}
+
+	}
 }
 
 //
