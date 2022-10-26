@@ -49,44 +49,52 @@ func Worker(mapf func(string, string) []KeyValue,
 	args := Args{}
 	reply := Reply{}
 
-	for ok := call("Coordinator.DistributeTask", &args, &reply); ok; ok = call("Coordinator.DistributeTask", &args, &reply) {
+	args.WorkerId = os.Getegid()
+	for call("Coordinator.DistributeTask", &args, &reply) {
 		switch reply.TaskType {
 		case MAP:
 			{
 				content, _ := os.ReadFile(reply.FileName)
 				kva := mapf(reply.FileName, string(content))
 
-				var intermediateFiles []*os.File
-
-				for i := 0; i < reply.NReduce; i += 1 {
-					intermediateFileName := "mr-" + strconv.Itoa(reply.MapIndex) + "-" + strconv.Itoa(i)
-					intermediateFile, _ := os.OpenFile(intermediateFileName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0660)
-					intermediateFiles = append(intermediateFiles, intermediateFile)
-				}
-
-				for _, kv := range kva {
-					intermediateFile := intermediateFiles[ihash(kv.Key)%reply.NReduce]
-					encoder := json.NewEncoder(intermediateFile)
-					encoder.Encode(&kv)
-
-				}
-
-				for i := 0; i < reply.NReduce; i += 1 {
-					defer intermediateFiles[i].Close()
-				}
-
 				args.MapIndex = reply.MapIndex
 				args.TaskType = MAP
-				call("Coordinator.CompleteTask", &args, &reply)
+				args.WorkerId = os.Getegid()
 
+				if call("Coordinator.CompleteTask", &args, &reply) && reply.TaskStatus {
+					var intermediateFiles []*os.File
+					for i := 0; i < reply.NReduce; i += 1 {
+						intermediateFileName := "mr-" + strconv.Itoa(reply.MapIndex) + "-" + strconv.Itoa(i)
+						intermediateFile, err := os.Create(intermediateFileName)
+						if err != nil {
+							log.Fatalf("cannot create %v", intermediateFileName)
+						}
+						intermediateFiles = append(intermediateFiles, intermediateFile)
+					}
+
+					for _, kv := range kva {
+						intermediateFile := intermediateFiles[ihash(kv.Key)%reply.NReduce]
+						encoder := json.NewEncoder(intermediateFile)
+						err := encoder.Encode(&kv)
+						if err != nil {
+							log.Fatalf("encoder fails")
+						}
+					}
+
+					for i := 0; i < reply.NReduce; i += 1 {
+						defer intermediateFiles[i].Close()
+					}
+				}
 			}
 		case REDUCE:
 			{
-				var kva []KeyValue
+				var kva, nkva []KeyValue
 				for i := 0; i < reply.NMap; i += 1 {
 					intermediateFileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.ReduceIndex)
-					intermediateFile, _ := os.Open(intermediateFileName)
-
+					intermediateFile, err := os.Open(intermediateFileName)
+					if err != nil {
+						log.Fatalf("cannot read %v", intermediateFileName)
+					}
 					decoder := json.NewDecoder(intermediateFile)
 					for {
 						var kv KeyValue
@@ -95,13 +103,8 @@ func Worker(mapf func(string, string) []KeyValue,
 						}
 						kva = append(kva, kv)
 					}
-
-					intermediateFile.Close()
-					// os.Remove(intermediateFileName)
+					defer intermediateFile.Close()
 				}
-
-				outputFileName := "mr-out-" + strconv.Itoa(reply.ReduceIndex)
-				outputFile, _ := os.Create(outputFileName)
 
 				sort.Sort(ByKey(kva))
 
@@ -117,22 +120,31 @@ func Worker(mapf func(string, string) []KeyValue,
 					for k := i; k < j; k++ {
 						values = append(values, kva[k].Value)
 					}
-
 					value := reducef(key, values)
 
-					fmt.Fprintf(outputFile, "%v %v\n", key, value)
-
+					kv := KeyValue{key, value}
+					nkva = append(nkva, kv)
 					i = j
 				}
 
-				outputFile.Close()
-
 				args.ReduceIndex = reply.ReduceIndex
 				args.TaskType = REDUCE
-				call("Coordinator.CompleteTask", &args, &reply)
+				args.WorkerId = os.Getegid()
+
+				if call("Coordinator.CompleteTask", &args, &reply) && reply.TaskStatus {
+					outputFileName := "mr-out-" + strconv.Itoa(reply.ReduceIndex)
+					outputFile, err := os.Create(outputFileName)
+					if err != nil {
+						log.Fatalf("cannot create %v", outputFileName)
+					}
+					for i := 0; i < len(nkva); i += 1 {
+						fmt.Fprintf(outputFile, "%v %v\n", nkva[i].Key, nkva[i].Value)
+					}
+					defer outputFile.Close()
+				}
 			}
 		case WAIT:
-			time.Sleep(time.Second)
+			time.Sleep(3 * time.Second)
 		default:
 			return
 		}

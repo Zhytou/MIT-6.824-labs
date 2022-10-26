@@ -34,6 +34,7 @@ const (
 )
 
 type Args struct {
+	WorkerId    int
 	TaskType    int
 	MapIndex    int
 	ReduceIndex int
@@ -42,6 +43,7 @@ type Args struct {
 type Reply struct {
 	FileName    string
 	TaskType    int
+	TaskStatus  bool
 	MapIndex    int
 	ReduceIndex int
 	NMap        int
