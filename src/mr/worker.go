@@ -8,7 +8,6 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
-	"strconv"
 	"time"
 )
 
@@ -46,53 +45,76 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	args := Args{}
-	reply := Reply{}
+	// TODO: 1、有时候wc和index会报错；2、出现这个就必定出错，待检查dialing:dial unix /var/tmp/824-mr-1000: connect: connection refused
+	for {
+		args := Args{}
+		reply := Reply{}
+		args.WorkerId = os.Getpid()
 
-	args.WorkerId = os.Getegid()
-	for call("Coordinator.DistributeTask", &args, &reply) {
+		if ok := call("Coordinator.DistributeTask", &args, &reply); !ok {
+			log.Fatal("rpc Coordinator.DistributeTask fails")
+		}
 		switch reply.TaskType {
 		case MAP:
 			{
-				content, _ := os.ReadFile(reply.FileName)
+				log.Printf("Worker %d recieves a map task %d", os.Getpid(), reply.MapIndex)
+				content, err := os.ReadFile(reply.FileName)
+				if err != nil {
+					log.Fatalf("cannot create %v", reply.FileName)
+				}
 				kva := mapf(reply.FileName, string(content))
 
 				args.MapIndex = reply.MapIndex
 				args.TaskType = MAP
-				args.WorkerId = os.Getegid()
+				args.WorkerId = os.Getpid()
+				reply.TaskStatus = false
 
 				if call("Coordinator.CompleteTask", &args, &reply) && reply.TaskStatus {
 					var intermediateFiles []*os.File
+					var encoders []*json.Encoder
 					for i := 0; i < reply.NReduce; i += 1 {
-						intermediateFileName := "mr-" + strconv.Itoa(reply.MapIndex) + "-" + strconv.Itoa(i)
-						intermediateFile, err := os.Create(intermediateFileName)
+						tmpFileName := fmt.Sprintf("pid-%d-mr-%d-%d", os.Getpid(), reply.MapIndex, i)
+						intermediateFile, err := os.Create(tmpFileName)
 						if err != nil {
-							log.Fatalf("cannot create %v", intermediateFileName)
+							log.Fatalf("cannot create %v", tmpFileName)
 						}
 						intermediateFiles = append(intermediateFiles, intermediateFile)
+
+						encoder := json.NewEncoder(intermediateFile)
+						encoders = append(encoders, encoder)
 					}
 
 					for _, kv := range kva {
-						intermediateFile := intermediateFiles[ihash(kv.Key)%reply.NReduce]
-						encoder := json.NewEncoder(intermediateFile)
-						err := encoder.Encode(&kv)
+						err := encoders[ihash(kv.Key)%reply.NReduce].Encode(&kv)
 						if err != nil {
 							log.Fatalf("encoder fails")
 						}
 					}
 
 					for i := 0; i < reply.NReduce; i += 1 {
-						defer intermediateFiles[i].Close()
+						intermediateFiles[i].Close()
 					}
+
+					for i := 0; i < reply.NReduce; i += 1 {
+						tmpFileName := fmt.Sprintf("pid-%d-mr-%d-%d", os.Getpid(), reply.MapIndex, i)
+						intermediateFileName := fmt.Sprintf("mr-%d-%d", reply.MapIndex, i)
+						err := os.Rename(tmpFileName, intermediateFileName)
+						if err != nil {
+							log.Fatalf("cannot rename %v", tmpFileName)
+						}
+					}
+
 				}
 			}
 		case REDUCE:
 			{
-				var kva, nkva []KeyValue
-				for i := 0; i < reply.NMap; i += 1 {
-					intermediateFileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.ReduceIndex)
+				log.Printf("Worker %d recieves a reduce task %d", os.Getpid(), reply.ReduceIndex)
+				var kva []KeyValue
+				for i := 0; i < reply.NMap; i++ {
+					intermediateFileName := fmt.Sprintf("mr-%d-%d", i, reply.ReduceIndex)
 					intermediateFile, err := os.Open(intermediateFileName)
 					if err != nil {
+						log.Print(err)
 						log.Fatalf("cannot read %v", intermediateFileName)
 					}
 					decoder := json.NewDecoder(intermediateFile)
@@ -103,10 +125,16 @@ func Worker(mapf func(string, string) []KeyValue,
 						}
 						kva = append(kva, kv)
 					}
-					defer intermediateFile.Close()
+					intermediateFile.Close()
 				}
 
 				sort.Sort(ByKey(kva))
+
+				tmpFileName := fmt.Sprintf("pid-%d-mr-out-%d", os.Getpid(), reply.ReduceIndex)
+				outputFile, err := os.Create(tmpFileName)
+				if err != nil {
+					log.Fatalf("cannot create %v", tmpFileName)
+				}
 
 				i := 0
 				for i < len(kva) {
@@ -115,36 +143,33 @@ func Worker(mapf func(string, string) []KeyValue,
 						j++
 					}
 
-					key := kva[i].Key
 					values := []string{}
 					for k := i; k < j; k++ {
 						values = append(values, kva[k].Value)
 					}
-					value := reducef(key, values)
+					value := reducef(kva[i].Key, values)
+					fmt.Fprintf(outputFile, "%v %v\n", kva[i].Key, value)
 
-					kv := KeyValue{key, value}
-					nkva = append(nkva, kv)
 					i = j
 				}
 
 				args.ReduceIndex = reply.ReduceIndex
 				args.TaskType = REDUCE
-				args.WorkerId = os.Getegid()
+				args.WorkerId = os.Getpid()
+				reply.TaskStatus = false
 
 				if call("Coordinator.CompleteTask", &args, &reply) && reply.TaskStatus {
-					outputFileName := "mr-out-" + strconv.Itoa(reply.ReduceIndex)
-					outputFile, err := os.Create(outputFileName)
+					outputFile.Close()
+					outputFileName := fmt.Sprintf("mr-out-%d", reply.ReduceIndex)
+					err := os.Rename(tmpFileName, outputFileName)
 					if err != nil {
-						log.Fatalf("cannot create %v", outputFileName)
+						log.Fatalf("cannot rename %v", tmpFileName)
 					}
-					for i := 0; i < len(nkva); i += 1 {
-						fmt.Fprintf(outputFile, "%v %v\n", nkva[i].Key, nkva[i].Value)
-					}
-					defer outputFile.Close()
 				}
+
 			}
 		case WAIT:
-			time.Sleep(3 * time.Second)
+			time.Sleep(5 * time.Second)
 		default:
 			return
 		}
