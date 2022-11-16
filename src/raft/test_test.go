@@ -782,6 +782,7 @@ func TestPersist22C(t *testing.T) {
 
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
+		log.Printf("Server %d %d disconnect", (leader1+1)%servers, (leader1+2)%servers)
 
 		cfg.one(10+index, servers-2, true)
 		index++
@@ -789,22 +790,30 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
+		log.Printf("Server %d %d %d disconnect", (leader1+0)%servers, (leader1+3)%servers, (leader1+4)%servers)
 
 		cfg.start1((leader1+1)%servers, cfg.applier)
 		cfg.start1((leader1+2)%servers, cfg.applier)
+		log.Printf("Server %d %d restart", (leader1+1)%servers, (leader1+2)%servers)
+
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
+		log.Printf("Server %d %d connect", (leader1+1)%servers, (leader1+2)%servers)
 
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1+3)%servers, cfg.applier)
+		log.Printf("Server %d restart", (leader1+3)%servers)
+
 		cfg.connect((leader1 + 3) % servers)
+		log.Printf("Server %d connect", (leader1+3)%servers)
 
 		cfg.one(10+index, servers-2, true)
 		index++
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
+		log.Printf("Server %d %d connect", (leader1+4)%servers, (leader1+0)%servers)
 	}
 
 	cfg.one(1000, servers, true)
@@ -823,19 +832,32 @@ func TestPersist32C(t *testing.T) {
 
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 2) % servers)
+	log.Printf("Server %d disconnects", (leader+2)%servers)
 
 	cfg.one(102, 2, true)
 
 	cfg.crash1((leader + 0) % servers)
+	log.Printf("Server %d crashes", (leader+0)%servers)
+
 	cfg.crash1((leader + 1) % servers)
+	log.Printf("Server %d crashes", (leader+1)%servers)
+
 	cfg.connect((leader + 2) % servers)
+	log.Printf("Server %d connects", (leader+2)%servers)
+
 	cfg.start1((leader+0)%servers, cfg.applier)
+	log.Printf("Server %d restarts", (leader+0)%servers)
+
 	cfg.connect((leader + 0) % servers)
+	log.Printf("Server %d connects", (leader+0)%servers)
 
 	cfg.one(103, 2, true)
 
 	cfg.start1((leader+1)%servers, cfg.applier)
+	log.Printf("Server %d restarts", (leader+1)%servers)
+
 	cfg.connect((leader + 1) % servers)
+	log.Printf("Server %d restarts", (leader+1)%servers)
 
 	cfg.one(104, servers, true)
 
@@ -883,6 +905,7 @@ func TestFigure82C(t *testing.T) {
 
 		if leader != -1 {
 			cfg.crash1(leader)
+			log.Printf("Server %d crashes", leader)
 			nup -= 1
 		}
 
@@ -890,7 +913,9 @@ func TestFigure82C(t *testing.T) {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
 				cfg.start1(s, cfg.applier)
+				log.Printf("Server %d restarts", s)
 				cfg.connect(s)
+				log.Printf("Server %d connects", s)
 				nup += 1
 			}
 		}
@@ -899,7 +924,9 @@ func TestFigure82C(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
+			log.Printf("Server %d restarts", i)
 			cfg.connect(i)
+			log.Printf("Server %d connects", i)
 		}
 	}
 
