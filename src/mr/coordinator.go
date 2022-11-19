@@ -21,7 +21,7 @@ type Task struct {
 
 type Coordinator struct {
 	// Your definitions here.
-	mtx            sync.RWMutex
+	mtx            sync.Mutex
 	inputFileNames []string
 	nMap           int
 	nReduce        int
@@ -31,10 +31,10 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
-const MAX_WAIT_TIME = time.Duration(10 * time.Second)
+const MAX_WAIT_TIME = time.Duration(15 * time.Second)
 
 func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
-	c.mtx.RLock()
+	c.mtx.Lock()
 	reply.NMap = c.nMap
 	reply.NReduce = c.nReduce
 	reply.TaskStatus = false
@@ -42,20 +42,17 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 	case MAP:
 		{
 			allMapTaskStatus := true
-			for i := 0; i < c.nMap && i < len(c.tasks); i += 1 {
+			for i := 0; i < len(c.tasks); i += 1 {
 				if !c.tasks[i].status {
 					allMapTaskStatus = false
 					if time.Since(c.tasks[i].startTime) > MAX_WAIT_TIME {
-						c.mtx.RUnlock()
-						c.mtx.Lock()
-
 						c.tasks[i].workerId = args.WorkerId
 						c.tasks[i].startTime = time.Now()
 
 						reply.FileName = c.tasks[i].fileName
 						reply.TaskType = MAP
 						reply.MapIndex = c.tasks[i].id
-
+						log.Printf("Redistribute a invalid map task %d to worker %d", reply.MapIndex, args.WorkerId)
 						c.mtx.Unlock()
 						return nil
 					}
@@ -63,19 +60,10 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 			}
 			if len(c.tasks) == c.nMap {
 				if allMapTaskStatus {
-					c.mtx.RUnlock()
-					c.mtx.Lock()
-
 					c.phase = REDUCE
-
-					c.mtx.Unlock()
-					c.mtx.RLock()
 				}
 				reply.TaskType = WAIT
 			} else {
-				c.mtx.RUnlock()
-				c.mtx.Lock()
-
 				newTask := Task{}
 				newTask.id = len(c.tasks)
 				newTask.workerId = args.WorkerId
@@ -88,6 +76,7 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 				reply.MapIndex = newTask.id
 				reply.FileName = c.inputFileNames[newTask.id]
 				reply.TaskType = MAP
+				log.Printf("Distribute a new map task %d to worker %d", reply.MapIndex, args.WorkerId)
 
 				c.mtx.Unlock()
 				return nil
@@ -97,19 +86,16 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 	case REDUCE:
 		{
 			allReduceTaskStatus := true
-			for i := c.nMap; i < c.nMap+c.nReduce && i < len(c.tasks); i += 1 {
-				if !c.tasks[i].status {
+			for i := c.nMap; i < len(c.tasks); i += 1 {
+				if c.tasks[i].taskType == REDUCE && !c.tasks[i].status {
 					allReduceTaskStatus = false
 					if time.Since(c.tasks[i].startTime) > MAX_WAIT_TIME {
-						c.mtx.RUnlock()
-						c.mtx.Lock()
-
 						c.tasks[i].workerId = args.WorkerId
 						c.tasks[i].startTime = time.Now()
 
 						reply.TaskType = REDUCE
 						reply.ReduceIndex = c.tasks[i].id
-
+						log.Printf("Redistribute a invalid reduce task %d to worker %d", reply.ReduceIndex, args.WorkerId)
 						c.mtx.Unlock()
 						return nil
 					}
@@ -117,19 +103,10 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 			}
 			if len(c.tasks) == c.nMap+c.nReduce {
 				if allReduceTaskStatus {
-					c.mtx.RUnlock()
-					c.mtx.Lock()
-
 					c.phase = DONE
-
-					c.mtx.Unlock()
-					c.mtx.RLock()
 				}
 				reply.TaskType = WAIT
 			} else {
-				c.mtx.RUnlock()
-				c.mtx.Lock()
-
 				newTask := Task{}
 				newTask.id = len(c.tasks) - c.nMap
 				newTask.workerId = args.WorkerId
@@ -140,6 +117,7 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 
 				reply.ReduceIndex = newTask.id
 				reply.TaskType = REDUCE
+				log.Printf("Distribute a new reduce task %d to worker %d", reply.ReduceIndex, args.WorkerId)
 
 				c.mtx.Unlock()
 				return nil
@@ -148,34 +126,32 @@ func (c *Coordinator) DistributeTask(args *Args, reply *Reply) error {
 	default:
 		reply.TaskType = DONE
 	}
-	c.mtx.RUnlock()
+	c.mtx.Unlock()
 	return nil
 }
 
 func (c *Coordinator) CompleteTask(args *Args, reply *Reply) error {
-	c.mtx.RLock()
+	c.mtx.Lock()
 	switch args.TaskType {
 	case MAP:
 		if !c.tasks[args.MapIndex].status && time.Since(c.tasks[args.MapIndex].startTime) <= MAX_WAIT_TIME && c.tasks[args.MapIndex].workerId == args.WorkerId {
-			c.mtx.RUnlock()
-			c.mtx.Lock()
 			c.tasks[args.MapIndex].status = true
+			log.Printf("Worker %d completes MapTask %d", args.WorkerId, args.MapIndex)
 			reply.TaskStatus = true
-			c.mtx.Unlock()
-			return nil
+		} else {
+			log.Printf("Worker %d fails MapTask %d", args.WorkerId, args.MapIndex)
 		}
 	case REDUCE:
 		if !c.tasks[c.nMap+args.ReduceIndex].status && time.Since(c.tasks[c.nMap+args.ReduceIndex].startTime) <= MAX_WAIT_TIME && c.tasks[c.nMap+args.ReduceIndex].workerId == args.WorkerId {
-			c.mtx.RUnlock()
-			c.mtx.Lock()
 			c.tasks[c.nMap+args.ReduceIndex].status = true
+			log.Printf("Worker %d completes ReduceTask %d", args.WorkerId, args.ReduceIndex)
 			reply.TaskStatus = true
-			c.mtx.Unlock()
-			return nil
+		} else {
+			log.Printf("Worker %d fails ReduceTask %d", args.WorkerId, args.ReduceIndex)
 		}
 	default:
 	}
-	c.mtx.RUnlock()
+	c.mtx.Unlock()
 	return nil
 }
 
@@ -213,9 +189,9 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
-	c.mtx.RLock()
+	c.mtx.Lock()
 	ret = c.phase == DONE
-	c.mtx.RUnlock()
+	c.mtx.Unlock()
 
 	return ret
 }
