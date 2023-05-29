@@ -4,6 +4,7 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
 )
 
 type Err string
@@ -30,4 +31,17 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type CommandArgs struct {
+	ClientId int64
+	CommandId int64
+	Key string
+	Value string
+	OpType  string
+}
+
+type CommandReply struct {
+	Value string
+	Err   Err
 }
