@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -12,7 +13,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 const ExecuteTimeout = 1000 * time.Millisecond
 
@@ -78,7 +79,7 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
-	persister *raft.Persister
+	persister    *raft.Persister
 
 	// Your definitions here.
 	lastApplied    int
@@ -97,7 +98,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *KVServer) Command(args *CommandArgs, reply *CommandReply) {
 	// Your code here.
-	defer DPrintf("{Node %v} processes CommandRequest %v with CommandResponse %v", kv.rf.Me(), args, reply)
+	// defer DPrintf("{Node %v} processes CommandRequest %v with CommandResponse %v", kv.rf.Me(), args, reply)
 	// return result directly without raft layer's participation if request is duplicated
 	kv.mu.RLock()
 	if args.OpType != "Get" && kv.isDuplicateRequest(args.ClientId, args.CommandId) {
@@ -166,7 +167,7 @@ func (kv *KVServer) applier() {
 				kv.mu.Unlock()
 				continue
 			}
-			
+
 			var cmd Op = message.Command.(Op)
 			kv.lastApplied = message.CommandIndex
 			var reply *CommandReply
@@ -203,25 +204,53 @@ func (kv *KVServer) applier() {
 				ch <- reply
 			}
 
-			// need snapshot
-			// if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
-			// 	DPrintf("{Node %v} tries to take snapshot for message %v", kv.rf.Me(), message)
-			// 	kv.takeSnapshot(message.CommandIndex)
-			// }
-			
+			// need to take a snapshot
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				DPrintf("{Node %v} tries to take snapshot for message %v", kv.rf.Me(), message)
+				kv.takeSnapshot(message.CommandIndex)
+			}
+
 			kv.mu.Unlock()
-			// } else if message.SnapshotValid {
-			// 	kv.mu.Lock()
-			// 	if kv.rf.CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot) {
-			// 		kv.restoreSnapshot(message.Snapshot)
-			// 		kv.lastApplied = message.SnapshotIndex
-			// 	}
-			// 	kv.mu.Unlock()
+		} else if message.SnapshotValid {
+			kv.mu.Lock()
+			if kv.rf.CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot) && message.SnapshotIndex > kv.lastApplied {
+				DPrintf("{Node %v} tries to install snapshot for message %v", kv.rf.Me(), message)
+				kv.installSnapshot(message.Snapshot)
+				kv.lastApplied = message.SnapshotIndex
+			}
+			kv.mu.Unlock()
 		} else {
 			panic(fmt.Sprintf("unexpected Message %v", message))
 		}
 	}
 
+}
+
+// take a snapshot(log compaction) when current size of persisent Raft state in bytes bigger than maxraftstate
+func (kv *KVServer) takeSnapshot(commandIndex int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.lastOperations)
+	e.Encode(kv.stateMachine)
+	e.Encode(kv.lastApplied)
+	data := w.Bytes()
+	kv.rf.Snapshot(commandIndex, data)
+}
+
+// read a snapshot and restore stateMachine
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var lastOperations map[int64]OperationContext
+	var stateMachine MemoryKV
+	var lastApplied int
+	if d.Decode(&lastOperations) != nil || d.Decode(&stateMachine) != nil || d.Decode(&lastApplied) != nil {
+		DPrintf("error to read the snapshot data")
+	} else {
+		kv.lastOperations = lastOperations
+		kv.stateMachine = &stateMachine
+		kv.lastApplied = lastApplied
+	}
 }
 
 //

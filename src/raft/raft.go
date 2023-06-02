@@ -176,10 +176,10 @@ func (rf *Raft) getLastLogIndex() int {
 // valid index begins at 1
 func (rf *Raft) getLogTermAt(logIndex int) int {
 	firstLogIndex := rf.getFirstLogIndex()
-	// lastLogIndex := rf.getLastLogIndex()
-	// if logIndex < firstLogIndex || logIndex > lastLogIndex || rf.log[logIndex-firstLogIndex].Index != logIndex {
-	// 	log.Fatalf("Server %d fails to get term at %d (firstlogindex %d)", rf.me, logIndex, firstLogIndex)
-	// }
+	lastLogIndex := rf.getLastLogIndex()
+	if logIndex < firstLogIndex || logIndex > lastLogIndex || rf.log[logIndex-firstLogIndex].Index != logIndex {
+		DPrintf("Server %d fails to get term at %d with firstlogindex = %d and lastlogindex = %d)", rf.me, logIndex, firstLogIndex, lastLogIndex)
+	}
 	return rf.log[logIndex-firstLogIndex].Term
 }
 
@@ -477,6 +477,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// check if follower's log entries match with the leader
 	lastLogIndex := rf.getLastLogIndex()
+	// firstLogIndex := rf.getFirstLogIndex()
 	if args.PrevLogIndex > lastLogIndex || rf.getLogTermAt(args.PrevLogIndex) != args.PrevLogTerm {
 		if args.PrevLogIndex > lastLogIndex {
 			reply.ConflictIndex, reply.ConflictTerm = lastLogIndex, rf.getLogTermAt(lastLogIndex)
@@ -495,13 +496,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	for offset := 1; offset <= len(args.Entries); offset += 1 {
 		if offset+args.PrevLogIndex > rf.getLastLogIndex() || rf.getLogTermAt(args.PrevLogIndex+offset) != args.Entries[offset-1].Term {
-			DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully", rf.me, args.Entries[0].Index, args.Entries[0].Index+len(args.Entries))
 			if offset+args.PrevLogIndex <= rf.getLastLogIndex() {
 				DPrintf("Log Replication: Server %d truncates log entries after %d successfully", rf.me, args.PrevLogIndex+offset)
 				rf.log = rf.getSubLogTo(args.PrevLogIndex + offset)
 			}
 			args.Entries = args.Entries[offset-1:]
 			rf.log = append(rf.log, args.Entries...)
+			DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully, logs = %v", rf.me, args.Entries[0].Index, args.Entries[0].Index+len(args.Entries), rf.log)
 			break
 		}
 	}
@@ -538,24 +539,38 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
 
-	if args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.getFirstLogIndex() {
+	if args.Term < rf.currentTerm {
 		return
 	}
 
 	if args.Term > rf.currentTerm {
-		rf.state = FOLLOWER
+		rf.currentTerm, rf.votedFor = args.Term, -1
+		rf.persist()
+	}
+
+	rf.state = FOLLOWER
+	rf.electionTimer.Reset(randomElectionTimeout())
+
+	// outdated snapshots
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
 	}
 
 	// asynchronously send info to clients(service layer)
-	rf.applyCh <- ApplyMsg{
-		CommandValid:  false,
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotIndex: args.LastIncludedIndex,
-		SnapshotTerm:  args.LastIncludedTerm,
-	}
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  false,
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotIndex: args.LastIncludedIndex,
+			SnapshotTerm:  args.LastIncludedTerm,
+		}
+	}()
+
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -758,10 +773,13 @@ func (rf *Raft) BroadcastHeartbeat() {
 								break
 							}
 							newPrevLogIndex := reply.ConflictIndex
-							if newPrevLogIndex > 0 && rf.getLogTermAt(newPrevLogIndex) != reply.ConflictTerm {
-								ConflictTerm := rf.getLogTermAt(newPrevLogIndex)
+							// newPrevLogIndex cannot equal to first log index because the first log index in the rf.log slice is the dummy entry which stores the snapshot info or invalid log entry
+							if newPrevLogIndex > rf.getFirstLogIndex() && rf.getLogTermAt(newPrevLogIndex) != reply.ConflictTerm {
+								conflictTerm := rf.getLogTermAt(newPrevLogIndex)
+								DPrintf("Log Replication: Server %d finds its term %d at index %d mismatch with reply %d", rf.me, conflictTerm, newPrevLogIndex, reply.ConflictTerm)
 								newPrevLogIndex -= 1
-								for newPrevLogIndex > 1 && ConflictTerm == rf.getLogTermAt(newPrevLogIndex) {
+								// make sure newPrevLogIndex > first log index
+								for newPrevLogIndex > rf.getFirstLogIndex()+1 && conflictTerm == rf.getLogTermAt(newPrevLogIndex) {
 									newPrevLogIndex -= 1
 								}
 							}
@@ -809,8 +827,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   rf.getLastLogIndex() + 1,
 		Command: command,
 	}
-	DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully *LEADER*", rf.me, newLogEntry.Index, newLogEntry.Index+1)
 	rf.log = append(rf.log, newLogEntry)
+	DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully *LEADER*, log = %v", rf.me, newLogEntry.Index, newLogEntry.Index+1, rf.log)
 	rf.mu.Unlock()
 	rf.persist()
 
