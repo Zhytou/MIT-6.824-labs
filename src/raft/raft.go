@@ -477,9 +477,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// check if follower's log entries match with the leader
 	lastLogIndex := rf.getLastLogIndex()
-	// firstLogIndex := rf.getFirstLogIndex()
-	if args.PrevLogIndex > lastLogIndex || rf.getLogTermAt(args.PrevLogIndex) != args.PrevLogTerm {
-		if args.PrevLogIndex > lastLogIndex {
+	firstLogIndex := rf.getFirstLogIndex()
+	if args.PrevLogIndex > lastLogIndex || args.PrevLogIndex < firstLogIndex || rf.getLogTermAt(args.PrevLogIndex) != args.PrevLogTerm {
+		if args.PrevLogIndex < firstLogIndex {
+			for conflictIndex := firstLogIndex; conflictIndex < lastLogIndex && conflictIndex < args.Entries[len(args.Entries)-1].Index; conflictIndex++ {
+				if rf.getLogTermAt(conflictIndex) != args.Entries[conflictIndex-firstLogIndex].Term {
+					reply.ConflictIndex, reply.ConflictTerm = conflictIndex, rf.getLogTermAt(conflictIndex)
+				}
+			}
+			if firstLogIndex > args.Entries[len(args.Entries)-1].Index {
+				reply.ConflictIndex, reply.ConflictTerm = firstLogIndex, rf.getLogTermAt(firstLogIndex)
+			}
+		} else if args.PrevLogIndex > lastLogIndex {
 			reply.ConflictIndex, reply.ConflictTerm = lastLogIndex, rf.getLogTermAt(lastLogIndex)
 		} else {
 			reply.ConflictTerm = rf.getLogTermAt(args.PrevLogIndex)
@@ -494,6 +503,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	rf.mu.Lock()
 	for offset := 1; offset <= len(args.Entries); offset += 1 {
 		if offset+args.PrevLogIndex > rf.getLastLogIndex() || rf.getLogTermAt(args.PrevLogIndex+offset) != args.Entries[offset-1].Term {
 			if offset+args.PrevLogIndex <= rf.getLastLogIndex() {
@@ -502,10 +512,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 			args.Entries = args.Entries[offset-1:]
 			rf.log = append(rf.log, args.Entries...)
-			DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully, logs = %v", rf.me, args.Entries[0].Index, args.Entries[0].Index+len(args.Entries), rf.log)
+			DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully", rf.me, args.Entries[0].Index, args.Entries[0].Index+len(args.Entries))
 			break
 		}
 	}
+	rf.mu.Unlock()
 
 	reply.Term, reply.Success, reply.ConflictIndex, reply.ConflictTerm = rf.currentTerm, true, -1, -1
 
@@ -828,7 +839,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.log = append(rf.log, newLogEntry)
-	DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully *LEADER*, log = %v", rf.me, newLogEntry.Index, newLogEntry.Index+1, rf.log)
+	DPrintf("Log Replication: Server %d appends log entries [%d , %d) successfully *LEADER*", rf.me, newLogEntry.Index, newLogEntry.Index+1)
 	rf.mu.Unlock()
 	rf.persist()
 
