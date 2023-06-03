@@ -13,7 +13,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = true
+const Debug = false
 
 const ExecuteTimeout = 1000 * time.Millisecond
 
@@ -40,11 +40,11 @@ type OperationContext struct {
 	LastReply *CommandReply
 }
 
-type KVStateMachine interface {
-	Get(key string) (string, Err)
-	Put(key, value string) Err
-	Append(key, value string) Err
-}
+// type KVStateMachine interface {
+// 	Get(key string) (string, Err)
+// 	Put(key, value string) Err
+// 	Append(key, value string) Err
+// }
 
 type MemoryKV struct {
 	KV map[string]string
@@ -84,7 +84,7 @@ type KVServer struct {
 	// Your definitions here.
 	lastApplied    int
 	lastOperations map[int64]OperationContext // last operation for each client
-	stateMachine   KVStateMachine             // KV stateMachine
+	stateMachine   *MemoryKV                  // KV stateMachine
 	notifyChans    map[int]chan *CommandReply // notify client goroutine by applier goroutine to response
 }
 
@@ -159,11 +159,11 @@ func (kv *KVServer) getNotifyChan(index int) chan *CommandReply {
 func (kv *KVServer) applier() {
 	for !kv.killed() {
 		message := <-kv.applyCh
-		DPrintf("{Node %v} tries to apply message %v", kv.rf.Me(), message)
+		// DPrintf("{Node %v} tries to apply message %v", kv.rf.Me(), message)
 		if message.CommandValid {
 			kv.mu.Lock()
 			if message.CommandIndex <= kv.lastApplied {
-				DPrintf("{Node %v} discards outdated message %v because a newer snapshot which lastApplied is %v has been restored", kv.rf.Me(), message, kv.lastApplied)
+				DPrintf("{Node %v} discards outdated message %v because lastApplied is %v", kv.rf.Me(), message, kv.lastApplied)
 				kv.mu.Unlock()
 				continue
 			}
@@ -205,8 +205,8 @@ func (kv *KVServer) applier() {
 			}
 
 			// need to take a snapshot
-			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
-				DPrintf("{Node %v} tries to take snapshot for message %v", kv.rf.Me(), message)
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
+				// DPrintf("{Node %v} tries to take snapshot for message %v, kv.stateMachine = %v", kv.rf.Me(), message, kv.stateMachine.KV)
 				kv.takeSnapshot(message.CommandIndex)
 			}
 
@@ -214,8 +214,8 @@ func (kv *KVServer) applier() {
 		} else if message.SnapshotValid {
 			kv.mu.Lock()
 			if kv.rf.CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot) && message.SnapshotIndex > kv.lastApplied {
-				DPrintf("{Node %v} tries to install snapshot for message %v", kv.rf.Me(), message)
-				kv.installSnapshot(message.Snapshot)
+				// DPrintf("{Node %v} tries to install snapshot for message %v", kv.rf.Me(), message)
+				kv.readSnapshot(message.Snapshot)
 				kv.lastApplied = message.SnapshotIndex
 			}
 			kv.mu.Unlock()
@@ -231,14 +231,17 @@ func (kv *KVServer) takeSnapshot(commandIndex int) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.lastOperations)
-	e.Encode(kv.stateMachine)
+	e.Encode(*(kv.stateMachine))
 	e.Encode(kv.lastApplied)
 	data := w.Bytes()
 	kv.rf.Snapshot(commandIndex, data)
 }
 
 // read a snapshot and restore stateMachine
-func (kv *KVServer) installSnapshot(snapshot []byte) {
+func (kv *KVServer) readSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	var lastOperations map[int64]OperationContext
@@ -298,17 +301,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.persister = persister
-
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	// You may need initialization code here.
 	kv.dead = 0
 	kv.lastApplied = 0
 	kv.lastOperations = make(map[int64]OperationContext)
 	kv.notifyChans = make(map[int]chan *CommandReply)
 	kv.stateMachine = NewMemoryKV()
+
+	kv.persister = persister
+	kv.readSnapshot(kv.persister.ReadSnapshot())
+
+	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
 	go kv.applier()
 	return kv
 }
