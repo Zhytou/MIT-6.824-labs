@@ -7,12 +7,11 @@ import (
 	"6.824/labrpc"
 )
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	leaderId int
-	clientId int64
+	leaderId  int
+	clientId  int64
 	commandId int64
 }
 
@@ -77,12 +76,11 @@ func (ck *Clerk) Command(args *CommandArgs) string {
 	args.ClientId, args.CommandId = ck.clientId, ck.commandId
 	for {
 		reply := CommandReply{}
-		if ok :=ck.servers[ck.leaderId].Call("KVServer.Command", args, &reply); !ok || reply.Err == ErrWrongLeader  || reply.Err == ErrTimeout {
+		if ok := ck.servers[ck.leaderId].Call("KVServer.Command", args, &reply); !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
 			ck.leaderId = (ck.leaderId + 1) % len(ck.servers)
 			continue
 		}
 		ck.commandId++
 		return reply.Value
 	}
-	
 }
